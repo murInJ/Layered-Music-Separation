@@ -1,0 +1,6 @@
+venv/*
+data/*
+test.py
+test.ipynb
+.idea/*
+.ipynb_checkpoints/*
