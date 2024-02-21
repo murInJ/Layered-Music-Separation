@@ -4,3 +4,5 @@ test.py
 test.ipynb
 .idea/*
 .ipynb_checkpoints/*
+save/*
+logs/*

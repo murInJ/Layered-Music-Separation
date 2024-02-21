@@ -6,7 +6,7 @@ from torch.utils.data import DataLoader
 from utils.io_utils import *
 
 def _split_array(array, size):
-    return [array[i:i + size] for i in range(0, len(array), size)]
+    return [array[i:i + size] for i in range(0, len(array), size) if len(array[i:i + size]) == size]
 
 def _normalize_waveform(waveform):
     max_amplitude = torch.max(torch.abs(waveform))
@@ -37,18 +37,34 @@ def _merge_waveforms(waveforms,sample_rates):
     return sum(_adjust_waveforms(waveforms)),sample_rates[0]
 
 
+def _get_randomCrop_point(waveform, sample_rate, target_seconds):
+    # 计算目标长度的采样点数
+    target_samples = int(target_seconds * sample_rate)
+
+    # 如果波形长度小于目标长度，直接返回波形
+    if waveform.shape[1] <= target_samples:
+        return waveform
+
+    # 随机选择裁剪起始点
+    start_sample = random.randint(0, waveform.shape[1] - target_samples)
+
+    # 切片获取裁剪后的波形片段
+    return start_sample,start_sample + target_samples
+
 
 class MusicDataset(Dataset):
-    def __init__(self, root='./data',basicSize=8,maxDataNum=1000,sample_rate=48000):
+    def __init__(self, root='./data',basicSize=8,maxDataNum=1000,sample_rate=48000,max_CropSecond=5):
         self.file = getFileList(root)
         self.basicSize = basicSize
         self.maxDataNum = maxDataNum
         self.sample_rate = sample_rate
+        self.max_CropSecond = max_CropSecond
     def __len__(self):
         return len(self.data)
 
     def __getitem__(self, idx):
         (data_w,sample_rate),target_w = self._load_path_data(self.data[idx])
+
         return data_w,target_w,sample_rate
 
     def generate_data(self):
@@ -65,7 +81,8 @@ class MusicDataset(Dataset):
             waveform = torch.mean(waveform, dim=0, keepdim=True)
             if sample_rate != self.sample_rate:
                 waveform = torchaudio.transforms.Resample(sample_rate, self.sample_rate)(waveform)
-            return (waveform, sample_rate),None
+            start, end = _get_randomCrop_point(waveform, sample_rate, self.max_CropSecond)
+            return (waveform[:,start:end], sample_rate),None
         if isinstance(path_data,list):
             waveforms = []
             sample_rates = []
@@ -77,19 +94,9 @@ class MusicDataset(Dataset):
 class MixMusicDataLoader(DataLoader):
     def __init__(self, dataset, batch_size=1, shuffle=False, sampler=None,
                  batch_sampler=None, num_workers=0,
-                 pin_memory=False, drop_last=False, timeout=0,
+                 pin_memory=False, drop_last=True, timeout=0,
                  worker_init_fn=None):
-        def collate_fn(batch):
-            sample_rate = batch[0][2]
-            batch_data_w = [item[0] for item in batch]
-            batch_target_w = [item[1] for item in batch]
 
-            maxLen = max(*[t.size(1) for t in batch_data_w],*sum([[t.size(1) for t in target] for target in batch_target_w],[]))
-            data_ws = torch.stack(_adjust_waveforms(batch_data_w,maxLen))
-            target_ws = [torch.stack(_adjust_waveforms(target_w,maxLen)) for target_w in batch_target_w]
-
-
-            return data_ws,target_ws,sample_rate
         super().__init__(
             dataset=dataset,
             batch_size=batch_size,
@@ -97,13 +104,25 @@ class MixMusicDataLoader(DataLoader):
             sampler=sampler,
             batch_sampler=batch_sampler,
             num_workers=num_workers,
-            collate_fn=collate_fn,
+            collate_fn=self.collate_fn,
             pin_memory=pin_memory,
             drop_last=drop_last,
             timeout=timeout,
             worker_init_fn=worker_init_fn,
         )
+        self.dataset.generate_data()
+    def collate_fn(self,batch):
+        sample_rate = batch[0][2]
+        batch_data_w = [item[0] for item in batch]
+        batch_target_w = [item[1] for item in batch]
 
+        maxLen = max(*[t.size(1) for t in batch_data_w],
+                     *sum([[t.size(1) for t in target] for target in batch_target_w], []))
+        data_ws = torch.stack(_adjust_waveforms(batch_data_w, maxLen))
+
+        target_ws = torch.cat([torch.stack(_adjust_waveforms(target_w, maxLen)) for target_w in batch_target_w], dim=1)
+
+        return data_ws, target_ws, sample_rate
     def __iter__(self):
         self.dataset.generate_data()
         for batch in super().__iter__():
